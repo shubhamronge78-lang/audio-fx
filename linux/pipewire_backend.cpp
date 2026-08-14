@@ -13,7 +13,10 @@
 #include <condition_variable>
 #include <vector>
 #include <string>
-// diagnostics removed
+// diagnostics
+#include <cstdio>
+#include <cerrno>
+#include <cstring>
 
 namespace audiofx::pipewire {
 
@@ -68,79 +71,26 @@ static void filter_process(void *data, struct spa_io_position *position)
 {
     Impl *impl = static_cast<Impl*>(data);
 
-    // Realtime callback: obtain buffers for each port and perform pass-through
-    // No allocations or locking here.
+    // Realtime callback: use PipeWire DSP helper to get per-port buffers.
     if (!impl->filter)
         return;
 
-    // For each port we dequeue a buffer and get dsp pointer if available.
-    // Expect four ports in order: input_FL, input_FR, output_FL, output_FR
     const size_t expected = 4;
     if (impl->portData.size() < expected)
         return;
 
-    // Dequeue buffers
-    struct pw_buffer *bufs[4] = {nullptr, nullptr, nullptr, nullptr};
-    for (size_t i = 0; i < expected; ++i) {
-        void *pd = impl->portData[i];
-        bufs[i] = pw_filter_dequeue_buffer(pd);
-    }
+    // Use position->clock.duration as the frame/sample count
+    if (!position) return;
+    uint32_t frames = position->clock.duration;
+    if (frames == 0) return;
 
-    // If any input buffer is null, nothing to do
-    if (!bufs[0] || !bufs[1] || !bufs[2] || !bufs[3]) {
-        // Requeue any buffers we dequeued
-        for (size_t i = 0; i < expected; ++i) {
-            if (bufs[i])
-                pw_filter_queue_buffer(impl->portData[i], bufs[i]);
-        }
+    float* inFL = static_cast<float*>(pw_filter_get_dsp_buffer(impl->portData[0], frames));
+    float* inFR = static_cast<float*>(pw_filter_get_dsp_buffer(impl->portData[1], frames));
+    float* outFL = static_cast<float*>(pw_filter_get_dsp_buffer(impl->portData[2], frames));
+    float* outFR = static_cast<float*>(pw_filter_get_dsp_buffer(impl->portData[3], frames));
+
+    if (!inFL || !inFR || !outFL || !outFR)
         return;
-    }
-
-    // Obtain SPA buffer pointers
-    struct spa_buffer *sbuf_inFL = bufs[0]->buffer;
-    struct spa_buffer *sbuf_inFR = bufs[1]->buffer;
-    struct spa_buffer *sbuf_outFL = bufs[2]->buffer;
-    struct spa_buffer *sbuf_outFR = bufs[3]->buffer;
-
-    if (!sbuf_inFL || !sbuf_inFR || !sbuf_outFL || !sbuf_outFR) {
-        for (size_t i = 0; i < expected; ++i) {
-            if (bufs[i])
-                pw_filter_queue_buffer(impl->portData[i], bufs[i]);
-        }
-        return;
-    }
-
-    // Assume dsp format: float32 planar (one channel per port)
-    float *inFL = reinterpret_cast<float*>(sbuf_inFL->datas[0].data);
-    float *inFR = reinterpret_cast<float*>(sbuf_inFR->datas[0].data);
-    float *outFL = reinterpret_cast<float*>(sbuf_outFL->datas[0].data);
-    float *outFR = reinterpret_cast<float*>(sbuf_outFR->datas[0].data);
-
-    // Determine frame count. Use the buffer's chunk size if available.
-    uint32_t frames = 0;
-    if (sbuf_inFL->datas[0].chunk && sbuf_inFL->datas[0].chunk->size)
-        frames = sbuf_inFL->datas[0].chunk->size / sizeof(float);
-    else if (sbuf_outFL->datas[0].chunk && sbuf_outFL->datas[0].chunk->size)
-        frames = sbuf_outFL->datas[0].chunk->size / sizeof(float);
-    else
-        frames = 0;
-
-    if (frames == 0) {
-        for (size_t i = 0; i < expected; ++i) {
-            if (bufs[i])
-                pw_filter_queue_buffer(impl->portData[i], bufs[i]);
-        }
-        return;
-    }
-
-    // Validate pointers
-    if (!inFL || !inFR || !outFL || !outFR) {
-        for (size_t i = 0; i < expected; ++i) {
-            if (bufs[i])
-                pw_filter_queue_buffer(impl->portData[i], bufs[i]);
-        }
-        return;
-    }
 
     if (impl->rtCb) {
         impl->rtCb(inFL, inFR, outFL, outFR, frames, impl->rtUser);
@@ -150,12 +100,6 @@ static void filter_process(void *data, struct spa_io_position *position)
             outFL[i] = inFL[i];
             outFR[i] = inFR[i];
         }
-    }
-
-    // Requeue buffers
-    for (size_t i = 0; i < expected; ++i) {
-        if (bufs[i])
-            pw_filter_queue_buffer(impl->portData[i], bufs[i]);
     }
 }
 
@@ -227,6 +171,8 @@ bool Backend::start()
         // Create core by connecting the context to the default PipeWire server
         impl->core = pw_context_connect(impl->context, nullptr, 0);
         if (!impl->core) {
+            int err = errno;
+            fprintf(stderr, "pw_context_connect() failed: %s (%d)\n", strerror(err), err);
             impl->startFailed.store(true);
             impl->cv.notify_all();
             return;
@@ -235,12 +181,12 @@ bool Backend::start()
         // Create filter (use pw_loop, not pw_core)
         impl->filter = pw_filter_new_simple(impl->loop, "AudioFX", props, &filter_events, impl);
         if (!impl->filter) {
+            int err = errno;
+            fprintf(stderr, "pw_filter_new_simple() failed: %s (%d)\n", strerror(err), err);
             impl->startFailed.store(true);
             impl->cv.notify_all();
             return;
         }
-
-        // Add four mono DSP ports with properties
         const char* port_names[4] = {"input_FL","input_FR","output_FL","output_FR"};
         const enum pw_direction dirs[4] = {PW_DIRECTION_INPUT, PW_DIRECTION_INPUT, PW_DIRECTION_OUTPUT, PW_DIRECTION_OUTPUT};
         const char* channels[4] = {"FL","FR","FL","FR"};
@@ -261,13 +207,16 @@ bool Backend::start()
         impl->portCount.store(impl->portData.size());
 
         // Connect filter (let PipeWire negotiate graph)
-        int res = pw_filter_connect(impl->filter, PW_FILTER_FLAG_NONE, nullptr, 0);
+        int res = pw_filter_connect(impl->filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0);
         (void)res;
 
         impl->filterCreated.store(true);
         impl->cv.notify_all();
 
         impl->running.store(true);
+
+        // Control thread loops; realtime diagnostics are not printed here
+        // in production builds.
 
         // Run main loop until stop signaled
         while (true) {

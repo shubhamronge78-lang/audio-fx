@@ -2,6 +2,10 @@
 #include <chrono>
 #include <thread>
 #include <iostream>
+#include <vector>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
 
 #include "../linux/pipewire_backend.h"
 
@@ -41,15 +45,8 @@ int main()
     assert(b.filterCreated());
     assert(b.isConnectedOrPaused());
 
-    // Print diagnostics and keep the backend alive for observation
-    std::cout << "AudioFX nodeId=" << b.nodeId()
-              << " portCount=" << b.portCount()
-              << " connectedOrPaused=" << (b.isConnectedOrPaused() ? "true" : "false")
-              << std::endl;
-
-    // Interactive hold: wait until user presses Enter so you can inspect the node
-    std::cout << "AudioFX is running. Press Enter to stop." << std::endl;
-    std::cin.get();
+    // Non-interactive deterministic test: let the filter run briefly and exit.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     // After Enter pressed, stop and shutdown
     assert(b.stop());

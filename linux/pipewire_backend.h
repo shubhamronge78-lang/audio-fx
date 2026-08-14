@@ -42,6 +42,7 @@ public:
     bool isConnectedOrPaused() const;
 
     void setRealtimeCallback(RtCallback cb, void* userData);
+    // Note: production code does not expose realtime diagnostics.
 
 private:
     // Pimpl not required for the first milestone; implementation
