@@ -1,0 +1,25 @@
+# Build
+build/
+cmake-build-*/
+
+# Compiled objects / libraries
+*.o
+*.a
+*.so
+*.so.*
+*.d
+*.dwo
+
+# Test/runtime artifacts
+core.*
+*.core
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+*~
