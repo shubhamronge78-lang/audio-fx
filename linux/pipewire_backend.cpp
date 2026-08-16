@@ -46,9 +46,10 @@ struct Impl {
 
     std::vector<void*> portData;
     std::vector<std::string> portNames;
-    // Processor integration
-    audiofx::core::IProcessor* processor{nullptr};
-    void* processorUser{nullptr};
+    // Processor integration.
+    // Published only while the backend is stopped, so the realtime thread
+    // never races with setProcessor().
+    std::atomic<audiofx::core::IProcessor*> processor{nullptr};
     // Fixed per-channel pointer arrays for realtime use (planar)
     float* inputsPtrs[2] = {nullptr, nullptr};
     float* outputsPtrs[2] = {nullptr, nullptr};
@@ -106,7 +107,9 @@ static void filter_process(void *data, struct spa_io_position *position)
 
     // If a processor is installed, call it directly in the realtime
     // callback using the platform-neutral AudioBlock interface.
-    if (impl->processor) {
+    auto* processor = impl->processor.load(std::memory_order_acquire);
+
+    if (processor) {
         audiofx::core::AudioBlock blk {
             /*inputs*/ impl->inputsPtrs,
             /*outputs*/ impl->outputsPtrs,
@@ -114,7 +117,7 @@ static void filter_process(void *data, struct spa_io_position *position)
             /*channels*/ 2,
             impl->cfg.sampleRate
         };
-        impl->processor->process(blk);
+        processor->process(blk);
     } else if (impl->rtCb) {
         impl->rtCb(inFL, inFR, outFL, outFR, frames, impl->rtUser);
     } else {
@@ -233,6 +236,12 @@ bool Backend::start()
         int res = pw_filter_connect(impl->filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0);
         (void)res;
 
+        // The processor was configured by setProcessor() while stopped.
+        // Start it before exposing the running backend to realtime processing.
+        auto* processor = impl->processor.load(std::memory_order_acquire);
+        if (processor)
+            processor->start();
+
         impl->filterCreated.store(true);
         impl->cv.notify_all();
 
@@ -253,6 +262,10 @@ bool Backend::start()
             pw_filter_destroy(impl->filter);
             impl->filter = nullptr;
         }
+
+        auto* stoppingProcessor = impl->processor.load(std::memory_order_acquire);
+        if (stoppingProcessor)
+            stoppingProcessor->stop();
 
         impl->running.store(false);
     });
@@ -346,15 +359,26 @@ void Backend::setRealtimeCallback(RtCallback cb, void* userData)
 
 void Backend::setProcessor(core::IProcessor* processor, void* userData)
 {
-    impl_->processor = processor;
-    impl_->processorUser = userData;
+    (void)userData;
 
     if (processor) {
-        // Configure processor according to current backend config
-        processor->configure(impl_->cfg.sampleRate, 2, impl_->cfg.framesPerBlock);
-        if (impl_->running.load())
-            processor->start();
+        // Configure completely before publishing the processor pointer.
+        processor->configure(
+            impl_->cfg.sampleRate,
+            2,
+            impl_->cfg.framesPerBlock
+        );
     }
+
+    // Publish only after configuration is complete.
+    impl_->processor.store(
+        processor,
+        std::memory_order_release
+    );
+
+    // If the backend is already running, start the processor immediately.
+    if (processor && impl_->running.load(std::memory_order_acquire))
+        processor->start();
 }
 
 } // namespace audiofx::pipewire

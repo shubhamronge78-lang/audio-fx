@@ -45,9 +45,17 @@ public:
 
     void setRealtimeCallback(RtCallback cb, void* userData);
 
-    // Install a non-owning processor to be invoked from the realtime
-    // `filter_process()` callback. The processor must outlive the backend
-    // and must obey realtime safety rules (no allocations, no locks).
+    // Install a non-owning processor.
+    //
+    // Must be called while the backend is stopped. Processor replacement or
+    // removal while realtime processing is active is not supported.
+    //
+    // configure() is called before the processor is published to the
+    // realtime callback. start()/stop() are paired with Backend::start()
+    // and Backend::stop().
+    //
+    // The processor must outlive the backend and must obey realtime safety
+    // rules in process(): no allocations, no locks, no blocking operations.
     void setProcessor(core::IProcessor* processor, void* userData = nullptr);
     // Note: production code does not expose realtime diagnostics.
 
