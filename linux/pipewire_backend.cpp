@@ -46,6 +46,12 @@ struct Impl {
 
     std::vector<void*> portData;
     std::vector<std::string> portNames;
+    // Processor integration
+    audiofx::core::IProcessor* processor{nullptr};
+    void* processorUser{nullptr};
+    // Fixed per-channel pointer arrays for realtime use (planar)
+    float* inputsPtrs[2] = {nullptr, nullptr};
+    float* outputsPtrs[2] = {nullptr, nullptr};
 };
 
 Backend::Backend()
@@ -92,7 +98,24 @@ static void filter_process(void *data, struct spa_io_position *position)
     if (!inFL || !inFR || !outFL || !outFR)
         return;
 
-    if (impl->rtCb) {
+    // Prepare planar pointer arrays (no allocations)
+    impl->inputsPtrs[0] = inFL;
+    impl->inputsPtrs[1] = inFR;
+    impl->outputsPtrs[0] = outFL;
+    impl->outputsPtrs[1] = outFR;
+
+    // If a processor is installed, call it directly in the realtime
+    // callback using the platform-neutral AudioBlock interface.
+    if (impl->processor) {
+        audiofx::core::AudioBlock blk {
+            /*inputs*/ impl->inputsPtrs,
+            /*outputs*/ impl->outputsPtrs,
+            frames,
+            /*channels*/ 2,
+            impl->cfg.sampleRate
+        };
+        impl->processor->process(blk);
+    } else if (impl->rtCb) {
         impl->rtCb(inFL, inFR, outFL, outFR, frames, impl->rtUser);
     } else {
         // Transparent pass-through
@@ -319,6 +342,19 @@ void Backend::setRealtimeCallback(RtCallback cb, void* userData)
 {
     impl_->rtCb = cb;
     impl_->rtUser = userData;
+}
+
+void Backend::setProcessor(core::IProcessor* processor, void* userData)
+{
+    impl_->processor = processor;
+    impl_->processorUser = userData;
+
+    if (processor) {
+        // Configure processor according to current backend config
+        processor->configure(impl_->cfg.sampleRate, 2, impl_->cfg.framesPerBlock);
+        if (impl_->running.load())
+            processor->start();
+    }
 }
 
 } // namespace audiofx::pipewire

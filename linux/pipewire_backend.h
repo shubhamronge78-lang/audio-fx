@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstddef>
+// include core processor interface
+#include "../core/processor.h"
 
 namespace audiofx::pipewire {
 
@@ -42,6 +44,11 @@ public:
     bool isConnectedOrPaused() const;
 
     void setRealtimeCallback(RtCallback cb, void* userData);
+
+    // Install a non-owning processor to be invoked from the realtime
+    // `filter_process()` callback. The processor must outlive the backend
+    // and must obey realtime safety rules (no allocations, no locks).
+    void setProcessor(core::IProcessor* processor, void* userData = nullptr);
     // Note: production code does not expose realtime diagnostics.
 
 private:

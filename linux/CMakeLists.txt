@@ -14,10 +14,18 @@ add_library(audiofx_pipewire STATIC
 
 target_include_directories(audiofx_pipewire PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# Expose PipeWire include dirs to consumers of audiofx_pipewire
+target_include_directories(audiofx_pipewire PUBLIC
     ${PIPEWIRE_INCLUDE_DIRS}
 )
 
 target_link_libraries(audiofx_pipewire PRIVATE
     audiofx_core
+)
+
+# Expose PipeWire libraries to consumers of audiofx_pipewire
+target_link_libraries(audiofx_pipewire PUBLIC
     ${PIPEWIRE_LIBRARIES}
 )

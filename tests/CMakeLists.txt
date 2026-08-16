@@ -13,6 +13,14 @@ add_test(NAME BiquadCoefficientsTest COMMAND audiofx_biquad_coefficients_test)
 add_executable(audiofx_parametric_eq_test parametric_eq_test.cpp)
 target_link_libraries(audiofx_parametric_eq_test PRIVATE audiofx_core)
 add_test(NAME ParametricEQTest COMMAND audiofx_parametric_eq_test)
+
+add_executable(processor_passthrough_test processor_passthrough_test.cpp)
+target_link_libraries(processor_passthrough_test PRIVATE audiofx_core)
+add_test(NAME ProcessorPassThroughTest COMMAND processor_passthrough_test)
+
+add_executable(processor_stereo_test processor_stereo_test.cpp)
+target_link_libraries(processor_stereo_test PRIVATE audiofx_core)
+add_test(NAME ProcessorStereoTest COMMAND processor_stereo_test)
 if(AUDIOFX_ENABLE_PIPEWIRE)
 	add_executable(
 		pipewire_backend_integration_test
@@ -42,5 +50,20 @@ if(AUDIOFX_ENABLE_PIPEWIRE)
 	add_test(
 		NAME PipeWireFilterLifecycleTest
 		COMMAND pipewire_filter_lifecycle_test
+	)
+
+	add_executable(
+		pipewire_processor_integration_test
+		pipewire_processor_integration_test.cpp
+	)
+
+	target_link_libraries(
+		pipewire_processor_integration_test
+		PRIVATE audiofx_pipewire audiofx_core
+	)
+
+	add_test(
+		NAME PipeWireProcessorIntegrationTest
+		COMMAND pipewire_processor_integration_test
 	)
 endif()
