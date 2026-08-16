@@ -45,19 +45,18 @@ public:
 
     void setRealtimeCallback(RtCallback cb, void* userData);
 
-    // Install a non-owning processor.
-    //
-    // Must be called while the backend is stopped. Processor replacement or
-    // removal while realtime processing is active is not supported.
-    //
-    // configure() is called before the processor is published to the
-    // realtime callback. start()/stop() are paired with Backend::start()
-    // and Backend::stop().
-    //
-    // The processor must outlive the backend and must obey realtime safety
-    // rules in process(): no allocations, no locks, no blocking operations.
-    void setProcessor(core::IProcessor* processor, void* userData = nullptr);
-    // Note: production code does not expose realtime diagnostics.
+	// Install a non-owning processor.
+	//
+	// configure() is called before the processor is published to the
+	// realtime callback. If the backend is already running, start() is
+	// called after publication.
+	//
+	// The processor must outlive the backend and must obey realtime safety
+	// rules in process(): no allocations, no locks, no blocking operations.
+	//
+	// Replacing or removing a processor while realtime processing is active
+	// is not supported.
+	void setProcessor(core::IProcessor* processor, void* userData = nullptr);
 
 private:
     // Pimpl not required for the first milestone; implementation
