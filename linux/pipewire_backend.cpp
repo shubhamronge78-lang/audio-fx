@@ -435,22 +435,28 @@ bool Backend::start()
         // while the backend was stopped.
         //
         // Start it before exposing the running backend to realtime
-        // processing.
-        auto* processor =
-            impl->processor.load(std::memory_order_acquire);
+        // processing. This transition is guarded by impl->mtx so it
+        // cannot interleave with a concurrent setProcessor() call,
+        // which takes the same lock to check/publish the processor.
+        {
+            std::lock_guard<std::mutex> lock(impl->mtx);
 
-        if (processor)
-            processor->start();
+            auto* processor =
+                impl->processor.load(std::memory_order_acquire);
 
-        impl->filterCreated.store(
-            true,
-            std::memory_order_release
-        );
+            if (processor)
+                processor->start();
 
-        impl->running.store(
-            true,
-            std::memory_order_release
-        );
+            impl->filterCreated.store(
+                true,
+                std::memory_order_release
+            );
+
+            impl->running.store(
+                true,
+                std::memory_order_release
+            );
+        }
 
         impl->cv.notify_all();
 
@@ -475,16 +481,22 @@ bool Backend::start()
         }
 
         // Stop the same processor that was active during this run.
-        auto* stoppingProcessor =
-            impl->processor.load(std::memory_order_acquire);
+        // Guarded by impl->mtx for the same reason as the start-side
+        // transition above.
+        {
+            std::lock_guard<std::mutex> lock(impl->mtx);
 
-        if (stoppingProcessor)
-            stoppingProcessor->stop();
+            auto* stoppingProcessor =
+                impl->processor.load(std::memory_order_acquire);
 
-        impl->running.store(
-            false,
-            std::memory_order_release
-        );
+            if (stoppingProcessor)
+                stoppingProcessor->stop();
+
+            impl->running.store(
+                false,
+                std::memory_order_release
+            );
+        }
     });
 
     {
@@ -635,6 +647,18 @@ void Backend::setProcessor(core::IProcessor* processor, void* userData)
 {
     (void)userData;
 
+    // Processor replacement/removal while the backend is running is
+    // not supported (see header comment). The check is taken under
+    // impl_->mtx -- the same mutex Backend::start()/stop() hold while
+    // transitioning impl_->running -- so this cannot race with those
+    // transitions. This lock is never taken in filter_process(), so
+    // the realtime callback is unaffected.
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+
+    if (impl_->running.load(std::memory_order_acquire)) {
+        return;
+    }
+
     // Configure the processor completely before publishing it
     // to the realtime thread.
     if (processor) {
@@ -650,13 +674,6 @@ void Backend::setProcessor(core::IProcessor* processor, void* userData)
         processor,
         std::memory_order_release
     );
-
-    // If the backend is already running, start the processor
-    // after it has been published.
-    if (processor &&
-        impl_->running.load(std::memory_order_acquire)) {
-        processor->start();
-    }
 }
 
 

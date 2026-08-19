@@ -48,14 +48,16 @@ public:
 	// Install a non-owning processor.
 	//
 	// configure() is called before the processor is published to the
-	// realtime callback. If the backend is already running, start() is
-	// called after publication.
+	// realtime callback, and start() is called by Backend::start()
+	// once the backend begins running.
 	//
 	// The processor must outlive the backend and must obey realtime safety
 	// rules in process(): no allocations, no locks, no blocking operations.
 	//
-	// Replacing or removing a processor while realtime processing is active
-	// is not supported.
+	// Replacing or removing a processor while the backend is running is
+	// not supported: calling setProcessor() while running (including
+	// with a null processor) has no effect and returns without
+	// changing the installed processor.
 	void setProcessor(core::IProcessor* processor, void* userData = nullptr);
 
 private:

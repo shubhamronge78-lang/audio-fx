@@ -254,6 +254,11 @@ int main()
     } proc;
     proc.cnt = &counter;
 
+    // Install processor before starting the backend so that
+    // Backend::start() can call processor->start() as part of
+    // the controlled lifecycle: configure -> start -> process -> stop.
+    b.setProcessor(&proc, nullptr);
+
     assert(b.start());
 
     // Initialize PipeWire for the test synthetic sources
@@ -543,9 +548,6 @@ int main()
         if (b.nodeId() != 0 && b.portCount() == 4 && b.filterCreated() && b.isConnectedOrPaused()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-
-    // Install processor after the filter is created/connected
-    b.setProcessor(&proc, nullptr);
 
     // Wait for registry to report AudioFX node and input ports and synthetic nodes/ports
     auto wait_for_disc = [&](auto pred, int timeout_ms)->bool {

@@ -66,4 +66,20 @@ if(AUDIOFX_ENABLE_PIPEWIRE)
 		NAME PipeWireProcessorIntegrationTest
 		COMMAND pipewire_processor_integration_test
 	)
+
+          add_executable(
+                  pipewire_processor_running_swap_test
+                  pipewire_processor_running_swap_test.cpp
+          )
+
+          target_link_libraries(
+                  pipewire_processor_running_swap_test
+                  PRIVATE audiofx_pipewire audiofx_core
+          )
+
+          add_test(
+                  NAME PipeWireProcessorRunningSwapTest
+                  COMMAND pipewire_processor_running_swap_test
+          )
+
 endif()
