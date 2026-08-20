@@ -3,6 +3,7 @@ add_library(audiofx_core STATIC
     dsp/biquad_filter.cpp
     dsp/biquad_coefficients.cpp
     dsp/parametric_eq.cpp
+    processors/eq_processor.cpp
 )
 
 target_include_directories(audiofx_core PUBLIC
