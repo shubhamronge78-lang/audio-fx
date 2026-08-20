@@ -8,9 +8,11 @@
 #include <string>
 #include <mutex>
 #include <condition_variable>
+#include <cmath>
 
 #include "../linux/pipewire_backend.h"
 #include "../core/processor.h"
+#include "../core/processors/eq_processor.h"
 
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
@@ -23,11 +25,12 @@
 
 
 // This test creates two synthetic pw_stream producers (mono FL and FR)
-// that should be autoconnected to the AudioFX filter inputs.
+// that should be connected through the AudioFX filter with an EQ processor.
 
 using audiofx::pipewire::Backend;
 using audiofx::pipewire::Config;
 using audiofx::core::IProcessor;
+using audiofx::core::processors::EQProcessor;
 
 // Synthetic producer descriptor used by callbacks
 struct Synthetic {
@@ -200,15 +203,6 @@ static void op_destroy_proxy(void* data) {
     if (r->proxy) pw_proxy_destroy((pw_proxy*)r->proxy);
 }
 
-struct ProxyAddListenerReq { void* proxy; LinkState* state; struct spa_hook* hook; };
-static void op_add_link_listener(void* data) {
-    ProxyAddListenerReq* r = (ProxyAddListenerReq*)data;
-    if (!r) return;
-    if (r->proxy && r->hook && r->state) {
-        pw_link_add_listener((pw_link*)r->proxy, r->hook, &link_events, r->state);
-    }
-}
-
 struct DestroyStreamReq { pw_stream* s; };
 static void op_destroy_stream(void* data) {
     DestroyStreamReq* r = (DestroyStreamReq*)data;
@@ -234,30 +228,16 @@ int main()
 
     assert(b.initialize(cfg));
 
-    std::atomic<uint64_t> counter{0};
-
-    struct TestProc : IProcessor {
-        std::atomic<uint64_t>* cnt;
-        void configure(uint32_t, uint32_t, uint32_t) noexcept override {}
-        void start() noexcept override {}
-        void stop() noexcept override {}
-        void process(const audiofx::core::AudioBlock& block) noexcept override {
-            // increment once per callback in RT-safe manner
-            cnt->fetch_add(1, std::memory_order_relaxed);
-            // optional pass-through
-            for (uint32_t c = 0; c < block.channels; ++c) {
-                float* in = block.inputs[c];
-                float* out = block.outputs[c];
-                for (uint32_t f = 0; f < block.frames; ++f) out[f] = in[f];
-            }
-        }
-    } proc;
-    proc.cnt = &counter;
+    // Create and configure the EQ processor
+    EQProcessor eqProc;
+    eqProc.configure(48000, 2, 128);
+    // Enable a peaking boost at 1000 Hz, +6 dB
+    eqProc.setPeakingBand(0, 1000.0f, 0.707f, 6.0f);
 
     // Install processor before starting the backend so that
     // Backend::start() can call processor->start() as part of
     // the controlled lifecycle: configure -> start -> process -> stop.
-    b.setProcessor(&proc, nullptr);
+    b.setProcessor(&eqProc, nullptr);
 
     assert(b.start());
 
@@ -267,7 +247,7 @@ int main()
     pw_context* context = pw_context_new(pw_main_loop_get_loop(mloop), nullptr, 0);
     pw_core* core = pw_context_connect(context, nullptr, 0);
 
-    // --- DIAGNOSTIC (Step 7): core error listener ---
+    // --- DIAGNOSTIC: core error listener ---
     struct spa_hook core_diag_hook;
     static const struct pw_core_events core_diag_events = {
         .version = PW_VERSION_CORE_EVENTS,
@@ -345,11 +325,6 @@ int main()
                 }
                 if (node_id_str) {
                     uint32_t nid = (uint32_t)atoi(node_id_str);
-                    // --- DIAGNOSTIC (Step 5): log every port unconditionally ---
-                    std::cerr << "ANY_PORT: id=" << id
-                              << " name=" << port_name
-                              << " dir=" << (dir_val ? dir_val : "?")
-                              << " node.id=" << nid << std::endl;
                     // Check if this port belongs to AudioFX
                     if (nid == d->audiofx_node_id) {
                         // require both name and direction to match intended mapping
@@ -360,8 +335,6 @@ int main()
                             if (strcmp(port_name, "output_FL") == 0) d->audiofx_output_fl_port = id;
                             if (strcmp(port_name, "output_FR") == 0) d->audiofx_output_fr_port = id;
                         }
-                        // diagnostic
-                        std::cerr << "DISCOVERED PORT: id=" << id << " name=" << port_name << " dir=" << (dir_val?dir_val:"?") << " node=" << nid << std::endl;
                         cv->notify_all();
                         return;
                     }
@@ -369,12 +342,6 @@ int main()
                     if (nid == d->synth_fl_node) { d->synth_fl_port = id; cv->notify_all(); return; }
                     if (nid == d->synth_fr_node) { d->synth_fr_port = id; cv->notify_all(); return; }
                     // If belongs to sink nodes (sinks are inputs) assign
-                    // FIX: sink nodes expose both a playback (dir=in) port and a
-                    // monitor (dir=out) port; only the playback/input port is a
-                    // valid link.input.port target. Without this check, whichever
-                    // port arrived last (often the monitor/output port) silently
-                    // overwrote sink_fl_port/sink_fr_port, causing link-factory to
-                    // reject the output link with EINVAL (two output ports).
                     if (nid == d->sink_fl_node) {
                         if (dir_val && strcmp(dir_val, "in") == 0) { d->sink_fl_port = id; cv->notify_all(); }
                         return;
@@ -390,20 +357,6 @@ int main()
             }
             // Link globals: capture when link props match our expected endpoints
             if (type && strcmp(type, PW_TYPE_INTERFACE_Link) == 0 && props) {
-                // --- DIAGNOSTIC (Step 9): log every Link global unconditionally ---
-                {
-                    const char* lon = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_NODE);
-                    const char* lop = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_PORT);
-                    const char* lin = spa_dict_lookup(props, PW_KEY_LINK_INPUT_NODE);
-                    const char* lip = spa_dict_lookup(props, PW_KEY_LINK_INPUT_PORT);
-                    std::cerr << "LINK_GLOBAL:\n"
-                              << "  id=" << id << "\n"
-                              << "  permissions=" << permissions << "\n"
-                              << "  link.output.node=" << (lon ? lon : "?") << "\n"
-                              << "  link.output.port=" << (lop ? lop : "?") << "\n"
-                              << "  link.input.node=" << (lin ? lin : "?") << "\n"
-                              << "  link.input.port=" << (lip ? lip : "?") << "\n";
-                }
                 const char* out_node = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_NODE);
                 const char* in_node = spa_dict_lookup(props, PW_KEY_LINK_INPUT_NODE);
                         if (out_node && in_node) {
@@ -476,8 +429,6 @@ int main()
         // global_remove
         [](void* data, uint32_t id) {
             (void)data;
-            // --- DIAGNOSTIC (Step 9): log every global removal ---
-            std::cerr << "LINK_GLOBAL_REMOVE:\n  id=" << id << "\n";
         }
     };
 
@@ -496,37 +447,8 @@ int main()
     sink_stream_events.state_changed = on_stream_state_changed;
     sink_stream_events.process = on_sink_process;
 
-    // Helper to create a mono stream with given channel name
-    auto make_stream = [&](Synthetic& s, const char* name, const char* channel, float fill)->bool {
-        // create properties with stable node name and media class
-        pw_properties* props = pw_properties_new(
-            PW_KEY_NODE_NAME, name,
-            PW_KEY_APP_NAME, "audiofx-test",
-            PW_KEY_MEDIA_CLASS, "Audio/Source",
-            NULL);
-        pw_stream* stream = pw_stream_new(core, name, props);
-        if (!stream) return false;
-        s.stream = stream;
-        s.fill_value = fill;
-        // attach listener (spa_hook must be stable storage)
-        struct spa_hook* hook = (struct spa_hook*)calloc(1, sizeof(struct spa_hook));
-        pw_stream_add_listener(stream, hook, &stream_events, &s);
-
-        // Connect stream (no autoconnect). We'll create explicit links later.
-        int res = pw_stream_connect(stream,
-            PW_DIRECTION_OUTPUT,
-            PW_ID_ANY,
-            static_cast<pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS),
-            nullptr,
-            0);
-        (void)res;
-        return true;
-    };
-
     // Start the main loop in a background thread before performing control operations
     std::thread pwloopThread([&]{ pw_main_loop_run(mloop); });
-
-    // PipeWire control operations will be executed via invoke_sync
 
     // Create FL and FR mono streams with deterministic non-zero samples by invoking on the main loop
     StreamCreateReq reqFL{core, "audiofx-test-src-FL", 0.25f, &srcFL, &stream_events, PW_DIRECTION_OUTPUT};
@@ -614,56 +536,10 @@ int main()
     void* fr_out_link_proxy = nullptr;
     LinkCreateReq outreq1{core, disc.audiofx_node_id, disc.audiofx_output_fl_port ? disc.audiofx_output_fl_port : 0, disc.sink_fl_node, disc.sink_fl_port ? disc.sink_fl_port : 0, &fl_out_link_proxy};
     LinkCreateReq outreq2{core, disc.audiofx_node_id, disc.audiofx_output_fr_port ? disc.audiofx_output_fr_port : 0, disc.sink_fr_node, disc.sink_fr_port ? disc.sink_fr_port : 0, &fr_out_link_proxy};
-    std::cerr << "Creating output links with props: audiofx_output_fl_port=" << disc.audiofx_output_fl_port << " audiofx_output_fr_port=" << disc.audiofx_output_fr_port << " sink_fl_port=" << disc.sink_fl_port << " sink_fr_port=" << disc.sink_fr_port << "\n";
-    // --- DIAGNOSTIC (Step 4): full link property values before creation ---
-    std::cerr << "OUTPUT LINK FL: link.output.node=" << disc.audiofx_node_id
-              << " link.output.port=" << disc.audiofx_output_fl_port
-              << " link.input.node=" << disc.sink_fl_node
-              << " link.input.port=" << disc.sink_fl_port << "\n";
-    std::cerr << "OUTPUT LINK FR: link.output.node=" << disc.audiofx_node_id
-              << " link.output.port=" << disc.audiofx_output_fr_port
-              << " link.input.node=" << disc.sink_fr_node
-              << " link.input.port=" << disc.sink_fr_port << "\n";
-    std::cerr << "Sink states: " << sinkFL.state.load() << ", " << sinkFR.state.load() << "\n";
     invoke_sync(pw_main_loop_get_loop(mloop), op_link_create, &outreq1);
     invoke_sync(pw_main_loop_get_loop(mloop), op_link_create, &outreq2);
     assert(fl_out_link_proxy && "failed to create FL output link proxy");
     assert(fr_out_link_proxy && "failed to create FR output link proxy");
-
-    std::cerr << "Created out link proxies: fl_out_link_proxy=" << fl_out_link_proxy << " fr_out_link_proxy=" << fr_out_link_proxy << "\n";
-
-    // --- DIAGNOSTIC (Step 8): proxy error listeners on output link proxies ---
-    static const struct pw_proxy_events link_proxy_diag_events = {
-        .version = PW_VERSION_PROXY_EVENTS,
-        .destroy = [](void* data) {
-            std::cerr << "LINK_PROXY_DESTROYED: " << (data ? (const char*)data : "?") << "\n";
-        },
-        .bound = [](void* data, uint32_t global_id) {
-            std::cerr << "LINK_PROXY_BOUND: " << (data ? (const char*)data : "?")
-                      << " global_id=" << global_id << "\n";
-        },
-        .error = [](void* data, int seq, int res, const char* message) {
-            std::cerr << "LINK_PROXY_ERROR: " << (data ? (const char*)data : "?")
-                      << "\n  seq=" << seq
-                      << "\n  res=" << res
-                      << "\n  message=" << (message ? message : "(null)") << "\n";
-        },
-    };
-    struct spa_hook* fl_out_proxy_hook = (struct spa_hook*)calloc(1, sizeof(struct spa_hook));
-    struct spa_hook* fr_out_proxy_hook = (struct spa_hook*)calloc(1, sizeof(struct spa_hook));
-    if (fl_out_link_proxy) {
-        std::cerr << "LINK_PROXY_CREATED: fl_out_link_proxy\n";
-        pw_proxy_add_listener((pw_proxy*)fl_out_link_proxy, fl_out_proxy_hook,
-                               &link_proxy_diag_events, (void*)"fl_out_link_proxy");
-    }
-    if (fr_out_link_proxy) {
-        std::cerr << "LINK_PROXY_CREATED: fr_out_link_proxy\n";
-        pw_proxy_add_listener((pw_proxy*)fr_out_link_proxy, fr_out_proxy_hook,
-                               &link_proxy_diag_events, (void*)"fr_out_link_proxy");
-    }
-    // Wait for registry to report the output link globals generated by link creation
-    ok = wait_for_disc([&]{ return disc.link_out_fl_global != 0 && disc.link_out_fr_global != 0; }, 5000);
-    if (!ok) std::cerr << "Warning: output link globals not reported within timeout (they may still appear shortly)\n";
 
     // Bind to link globals and observe state
     LinkState fl_state, fr_state;
@@ -721,56 +597,18 @@ int main()
     }
     assert(out_fl_ready && out_fr_ready && "output links did not become ready");
 
-    // Print discovered IDs and link states for test reporting
-    std::cerr << "AudioFX node=" << disc.audiofx_node_id << std::endl;
-    std::cerr << "AudioFX input_FL=" << disc.audiofx_input_fl_port << std::endl;
-    std::cerr << "AudioFX input_FR=" << disc.audiofx_input_fr_port << std::endl;
-
-    std::cerr << "Synthetic FL node=" << disc.synth_fl_node << std::endl;
-    std::cerr << "Synthetic FL port=" << disc.synth_fl_port << std::endl;
-
-    std::cerr << "Synthetic FR node=" << disc.synth_fr_node << std::endl;
-    std::cerr << "Synthetic FR port=" << disc.synth_fr_port << std::endl;
-
-    std::cerr << "FL link proxy=" << fl_link_proxy << " global=" << disc.link_fl_global << std::endl;
-    std::cerr << "FR link proxy=" << fr_link_proxy << " global=" << disc.link_fr_global << std::endl;
-
-    std::cerr << "FL link state=" << fl_state.state.load() << std::endl;
-    std::cerr << "FR link state=" << fr_state.state.load() << std::endl;
-    std::cerr << "OUT FL link state=" << out_fl_state.state.load() << std::endl;
-    std::cerr << "OUT FR link state=" << out_fr_state.state.load() << std::endl;
-
-    std::cerr << "FL stream state streaming=" << srcFL.streaming.load() << " process_count=" << srcFL.process_count.load() << std::endl;
-    std::cerr << "FR stream state streaming=" << srcFR.streaming.load() << " process_count=" << srcFR.process_count.load() << std::endl;
-
-    std::cerr << "Sink FL stream state streaming=" << sinkFL.streaming.load() << " consume_count=" << sinkFL.process_count.load() << std::endl;
-    std::cerr << "Sink FR stream state streaming=" << sinkFR.streaming.load() << " consume_count=" << sinkFR.process_count.load() << std::endl;
-
-    std::cerr << "processor counter=" << counter.load(std::memory_order_relaxed) << std::endl;
-
-    // Explicit checks with clear diagnostics
-    if (!srcFL.streaming.load()) { std::cerr << "ERROR: FL stream not streaming" << std::endl; assert(false && "FL stream not streaming"); }
-    if (!srcFR.streaming.load()) { std::cerr << "ERROR: FR stream not streaming" << std::endl; assert(false && "FR stream not streaming"); }
-    if (!fl_link_proxy) { std::cerr << "ERROR: FL link proxy is null" << std::endl; assert(false && "FL link proxy null"); }
-    if (!fr_link_proxy) { std::cerr << "ERROR: FR link proxy is null" << std::endl; assert(false && "FR link proxy null"); }
-    if (disc.link_fl_global == 0 || disc.link_fr_global == 0) { std::cerr << "ERROR: Link globals missing fl=" << disc.link_fl_global << " fr=" << disc.link_fr_global << std::endl; assert(false && "Link globals missing"); }
-    if (disc.audiofx_input_fl_port == 0 || disc.audiofx_input_fr_port == 0) { std::cerr << "ERROR: AudioFX input ports missing" << std::endl; assert(false && "AudioFX input ports missing"); }
-    if (fl_state.state.load() < PW_LINK_STATE_PAUSED) { std::cerr << "ERROR: FL link not paused/active state=" << fl_state.state.load() << std::endl; assert(false && "FL link not ready"); }
-    if (fr_state.state.load() < PW_LINK_STATE_PAUSED) { std::cerr << "ERROR: FR link not paused/active state=" << fr_state.state.load() << std::endl; assert(false && "FR link not ready"); }
-    if (out_fl_state.state.load() < PW_LINK_STATE_PAUSED) { std::cerr << "ERROR: OUT FL link not paused/active state=" << out_fl_state.state.load() << std::endl; assert(false && "OUT FL link not ready"); }
-    if (out_fr_state.state.load() < PW_LINK_STATE_PAUSED) { std::cerr << "ERROR: OUT FR link not paused/active state=" << out_fr_state.state.load() << std::endl; assert(false && "OUT FR link not ready"); }
-    if (sinkFL.state.load() < PW_STREAM_STATE_PAUSED) { std::cerr << "ERROR: Sink FL not connected state=" << sinkFL.state.load() << std::endl; assert(false && "Sink FL not connected"); }
-    if (sinkFR.state.load() < PW_STREAM_STATE_PAUSED) { std::cerr << "ERROR: Sink FR not connected state=" << sinkFR.state.load() << std::endl; assert(false && "Sink FR not connected"); }
-
     // Wait up to 3 seconds for the processor to be invoked
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    uint64_t lastCounter = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (counter.load(std::memory_order_relaxed) > 0) break;
+        lastCounter = srcFL.process_count.load(std::memory_order_relaxed);
+        if (lastCounter > 5) break; // Give filter time to process enough samples
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    // The processor should have been called at least once
-    assert(counter.load(std::memory_order_relaxed) > 0);
+    // The processor should have been invoked multiple times
+    assert(lastCounter > 5 && "Processor should be invoked multiple times");
+    std::cerr << "Processor invoked " << lastCounter << " times\n";
 
     // Stop synthetic streams and cleanup PipeWire on the main-loop thread
     // destroy link proxies (bound proxies)
