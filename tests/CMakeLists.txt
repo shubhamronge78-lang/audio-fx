@@ -21,6 +21,11 @@ add_test(NAME ProcessorPassThroughTest COMMAND processor_passthrough_test)
 add_executable(processor_stereo_test processor_stereo_test.cpp)
 target_link_libraries(processor_stereo_test PRIVATE audiofx_core)
 add_test(NAME ProcessorStereoTest COMMAND processor_stereo_test)
+
+add_executable(eq_processor_test eq_processor_test.cpp)
+target_link_libraries(eq_processor_test PRIVATE audiofx_core)
+add_test(NAME EQProcessorTest COMMAND eq_processor_test)
+
 if(AUDIOFX_ENABLE_PIPEWIRE)
 	add_executable(
 		pipewire_backend_integration_test
